@@ -2711,6 +2711,28 @@ int timespec_get(struct timespec *ts, int base)
  *      =======================================================================
  */
 
+/* Helper to parse nanoseconds from a string starting with . */
+static long parse_nsec(const char *str)
+{
+  long nsec = 0;
+  long multiplier = 100000000;
+
+  /* Skip the decimal point */
+  if (*str == '.') str++;
+  else return 0;
+
+  while (*str >= '0' && *str <= '9')
+  {
+    if (multiplier >= 1)
+    {
+      nsec += (*str - '0') * multiplier;
+      multiplier /= 10;
+    }
+    str++;
+  }
+  return nsec;
+}
+
 static void parse_ft_string(const char *user_faked_time)
 {
   struct tm user_faked_time_tm;
@@ -2740,8 +2762,7 @@ static void parse_ft_string(const char *user_faked_time)
 
         if (nstime_str[0] == '.')
         {
-          double nstime = atof(--nstime_str);
-          user_faked_time_timespec.tv_nsec = (nstime - floor(nstime)) * SEC_TO_nSEC;
+          user_faked_time_timespec.tv_nsec = parse_nsec(nstime_str);
         }
         user_faked_time_set = true;
       }
@@ -2757,19 +2778,53 @@ static void parse_ft_string(const char *user_faked_time)
     case '+':
     case '-': /* User-specified offset */
       if (ft_mode != FT_NOOP) ft_mode = FT_START_AT;
-      /* fractional time offsets contributed by Karl Chen in v0.8 */
-      double frac_offset = atof(user_faked_time);
+      
+      /* Check for modifiers */
+      if (strpbrk(user_faked_time, "mhdy") != NULL)
+      {
+        /* fractional time offsets contributed by Karl Chen in v0.8 */
+        double frac_offset = atof(user_faked_time);
 
-      /* offset is in seconds by default, but the string may contain
-       * multipliers...
-       */
-      if (strchr(user_faked_time, 'm') != NULL) frac_offset *= 60;
-      else if (strchr(user_faked_time, 'h') != NULL) frac_offset *= 60 * 60;
-      else if (strchr(user_faked_time, 'd') != NULL) frac_offset *= 60 * 60 * 24;
-      else if (strchr(user_faked_time, 'y') != NULL) frac_offset *= 60 * 60 * 24 * 365;
+        /* offset is in seconds by default, but the string may contain
+         * multipliers...
+         */
+        if (strchr(user_faked_time, 'm') != NULL) frac_offset *= 60;
+        else if (strchr(user_faked_time, 'h') != NULL) frac_offset *= 60 * 60;
+        else if (strchr(user_faked_time, 'd') != NULL) frac_offset *= 60 * 60 * 24;
+        else if (strchr(user_faked_time, 'y') != NULL) frac_offset *= 60 * 60 * 24 * 365;
 
-      user_offset.tv_sec = floor(frac_offset);
-      user_offset.tv_nsec = (frac_offset - user_offset.tv_sec) * SEC_TO_nSEC;
+        user_offset.tv_sec = floor(frac_offset);
+        user_offset.tv_nsec = (frac_offset - user_offset.tv_sec) * SEC_TO_nSEC;
+      }
+      else
+      {
+        /* High precision parsing for simple offsets */
+        bool is_negative = (user_faked_time[0] == '-');
+        const char *ptr = user_faked_time;
+        if (*ptr == '+' || *ptr == '-') ptr++;
+
+        user_offset.tv_sec = atol(ptr); /* Parse absolute seconds */
+        user_offset.tv_nsec = 0;
+
+        const char *dot = strchr(ptr, '.');
+        if (dot)
+        {
+          user_offset.tv_nsec = parse_nsec(dot);
+        }
+
+        if (is_negative)
+        {
+          if (user_offset.tv_nsec > 0)
+          {
+             user_offset.tv_sec = -user_offset.tv_sec - 1;
+             user_offset.tv_nsec = SEC_TO_nSEC - user_offset.tv_nsec;
+          }
+          else
+          {
+             user_offset.tv_sec = -user_offset.tv_sec;
+          }
+        }
+      }
       timespecadd(&ftpl_starttime.real, &user_offset, &user_faked_time_timespec);
       goto parse_modifiers;
       break;
@@ -2857,10 +2912,31 @@ parse_modifiers:
       }
       else if (NULL != (tmp_time_fmt = strchr(user_faked_time, 'i')))
       {
-        double tick_inc = atof(tmp_time_fmt + 1);
-        /* increment time with every time() call */
-        user_per_tick_inc.tv_sec = floor(tick_inc);
-        user_per_tick_inc.tv_nsec = (tick_inc - user_per_tick_inc.tv_sec) * SEC_TO_nSEC ;
+        const char *inc_str = tmp_time_fmt + 1;
+        bool is_negative = (*inc_str == '-');
+        if (*inc_str == '+' || *inc_str == '-') inc_str++;
+
+        user_per_tick_inc.tv_sec = atol(inc_str);
+        user_per_tick_inc.tv_nsec = 0;
+
+        const char *dot = strchr(inc_str, '.');
+        if (dot)
+        {
+          user_per_tick_inc.tv_nsec = parse_nsec(dot);
+        }
+
+        if (is_negative)
+        {
+          if (user_per_tick_inc.tv_nsec > 0)
+          {
+            user_per_tick_inc.tv_sec = -user_per_tick_inc.tv_sec - 1;
+            user_per_tick_inc.tv_nsec = SEC_TO_nSEC - user_per_tick_inc.tv_nsec;
+          }
+          else
+          {
+            user_per_tick_inc.tv_sec = -user_per_tick_inc.tv_sec;
+          }
+        }
         user_per_tick_inc_set = true;
       }
       break;
